@@ -13,7 +13,7 @@ from scipy.spatial.distance import pdist
 
 plt.style.use('ggplot')
 
-class CodonUsageBook(object):
+class CodonBook(object):
 	def __init__(self):
 		self.codontable={'TTT':'Phe','TTC':'Phe','TTA':'Leu','TTG':'Leu','CTT':'Leu','CTC':'Leu','CTA':'Leu','CTG':'Leu',
 						 'ATT':'Ile','ATC':'Ile','ATA':'Ile','ATG':'Met','GTT':'Val','GTC':'Val','GTA':'Val','GTG':'Val',
@@ -30,7 +30,21 @@ class CodonUsageBook(object):
 		self.codonusage['amino_acid']=self.codonusage.index.map(lambda x: self.codontable[x])
 		self.aalist=self.codonusage['amino_acid'].unique() # amino acid list
 
-	def add_gene(self,df):  # df contains codons as index and their counts on a column
+	def add_gene(self,seqrecord,namestartwith='gene='):  # fasta seqrecord object from Biopython
+		# parse seqrecord object
+		genename=re.search(namestartwith+'[a-z,0-9,\ ,\',\-,\.]+',seqrecord.description,flags=re.IGNORECASE)
+		if genename > 0:
+			genename=genename.group(0)[len(namestartwith):]
+		else:
+			genename='noname'	
+		seq=str(seqrecord.seq)
+
+		# extract codon info
+		triplets=pd.Series([seq[i:i+3] for i in range(3,len(seq)-3,3)])   # split sequences into codons (exclude start and stop codon)
+		triplet_counts=triplets.value_counts().to_dict()
+		df=pd.DataFrame(triplet_counts.values(),index=triplet_counts.keys(),columns=[genename])
+
+		# add to codonusage dataframe
 		self.codonusage=pd.merge(self.codonusage,df,how='outer',left_index=True,right_index=True).fillna(0)
 		self.codonusage=self.codonusage.sort_values('amino_acid')
 
@@ -44,76 +58,52 @@ class CodonUsageBook(object):
 		return df.fillna(0)
 
 	def normalize_by_totalaa(self):
-		return self.codonusage.ix[:,1:]/self.codonusage.ix[:,1:].sum()
+		df=self.codonusage.copy()
+		df.ix[:,1:]/df.ix[:,1:].sum()
+		
+		return df.fillna(0)
 
-
-class CodonUsagePerGene(object):
-	def __init__(self,seqrecord): # fasta seqrecord object
-		self.seqrecord=seqrecord
-		self.seq=seqrecord.seq.tostring()
-		self.description=re.split(' \[|\] \[|\]',self.seqrecord.description)
-		self.name=self.description[1]
-
-	def codon_usage(self):
-		triplets=pd.Series([self.seq[i:i+3] for i in range(3,len(self.seq),3)])   # split sequences into codons (exclude start codon)
-		triplet_counts=triplets.value_counts().to_dict()
-		return pd.DataFrame(triplet_counts.values(),index=triplet_counts.keys(),columns=[self.name])
-
-
- 
-
+	
 
 
 if __name__ == "__main__":
 
-# load fasta
-	filepath='../sequence_data/BW25113_cds.txt'
+	# load fasta
+	filepath='sequence_data/lambda_cds.txt'
 	record=SeqIO.parse(open(filepath,'rU'),'fasta')
-	book=CodonUsageBook()
+	book=CodonBook()
 
 	for feature in record:
-		gene=CodonUsagePerGene(feature)
-		book.add_gene(gene.codon_usage())
+		book.add_gene(feature)
 
-	df=book.normalize_by_totalaa()
-
-	plt.pcolor(df.ix[:,1:],cmap=matplotlib.cm.Blues,vmin=0,vmax=df.ix[:,1:].max().max())
-
-
-
-	D=df.ix[book.regulatorycodons,1:].transpose()
-	# D=book.codonusage.ix[:,1:].transpose()
+	# df=book.normalize_by_totalaa().ix[:,1:].transpose()
+	# df=book.codonusage.ix[book.sensitivecodons,1:].transpose()
 	# Compute and plot first dendrogram.
 	fig = plt.figure(figsize=(18,12))
 	ax1 = fig.add_axes([0.05,0.1,0.2,0.8])
-	Y = linkage(D, method='ward')
-	Z1 = dendrogram(Y, orientation='right')
+	y=linkage(df,method='ward')
+	z=dendrogram(y,orientation='right')
 	ax1.set_xticks([])
 	ax1.set_yticks([])
 
-	# Compute and plot second dendrogram.
-	# ax2 = fig.add_axes([0.3,0.71,0.6,0.2])
-	# Y = linkage(D.transpose(), method='weighted')
-	# Z2 = dendrogram(Y)
-	# ax2.set_xticks([])
-	# ax2.set_yticks([])
 
 	# Plot distance matrix.
 	axmatrix = fig.add_axes([0.3,0.1,0.6,0.8])
-	idx1 = Z1['leaves']
+	idx1 = z['leaves']
 	# idx2 = Z2['leaves']
-	D = D.ix[idx1,:]
+	df = df.ix[idx1,:]
 	# D = D.ix[:,idx2]
-	im = axmatrix.matshow(D, aspect='auto', origin='lower', cmap=matplotlib.cm.YlGnBu)
-	axmatrix.set_xticks(range(len(D.columns)))
-	axmatrix.set_yticks(range(len(D.index)))
-	axmatrix.set_xticklabels(D.columns,rotation=90)
-	axmatrix.set_yticklabels(D.index.map(lambda x:x[5:]))
+	im = axmatrix.matshow(df, aspect='auto', origin='lower', cmap=matplotlib.cm.YlOrRd)
+	axmatrix.set_xticks(range(len(df.columns)))
+	axmatrix.set_yticks(range(len(df.index)))
+	axmatrix.set_xticklabels(df.columns,rotation=90)
+	axmatrix.set_yticklabels(df.index)
 
 	# Plot colorbar.
-	# axcolor = fig.add_axes([0.91,0.1,0.02,0.6])
-	# fig.savefig('cluster.pdf')
-	fig.show()
+	axcolor = fig.add_axes([0.91,0.1,0.02,0.8])
+	plt.colorbar(im,cax=axcolor)
+	fig.savefig('cluster.pdf')
+	# fig.show()
 
 
 
