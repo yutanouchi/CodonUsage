@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from pybedtools import BedTool
 from Bio import SeqIO
+from Bio.Seq import Seq
 from matplotlib import pyplot as plt
 import matplotlib
 from scipy.cluster.hierarchy import dendrogram, linkage, cophenet
@@ -62,6 +63,118 @@ class CodonBook(object):
 		df.ix[:,1:]/df.ix[:,1:].sum()
 		
 		return df.fillna(0)
+
+
+	# use this after creating codonusage by add_gene
+	def expressed_codon(self,expressiondf):  # expressiondf is a pd.DataFrame and contains gene names (1st column) and counts (2nd column)
+		df=expressiondf
+		self.expressed_codonusage=self.codonusage.copy()
+		
+		for gene in df.index:
+
+
+class SynGeneName(object):
+	def __init__(self,gbrecord): # gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
+		self.namedict={}
+		for f in gbrecord.features:
+			if f.type=='CDS':
+				genename=f.qualifiers['gene'][0]
+				synname=re.split(';\ *',f.qualifiers['gene_synonym'][0])
+				if not self.namedict.has_key(genename):
+					synname.append(genename)
+					self.namedict.update({name:synname for name in synname})
+				
+
+	def lookup(self,primaryname):
+		if self.namedict.has_key(primaryname):
+			return self.namedict[primaryname]
+		else:
+			print(primaryname+' does not exist')
+
+
+
+
+
+class tAI(object):
+	def __init__(self):
+		self.selective_constraint=pd.DataFrame(index=['I','G','U','C','L'],columns=['T','C','A','G']).fillna(0)
+		# initialize selective constraint for wobbling using values from dos Reis et al (2004). 
+		self.selective_constraint.ix['G','T']=0.561
+		self.selective_constraint.ix['I','C']=0.28
+		self.selective_constraint.ix['I','A']=0.9999
+		self.selective_constraint.ix['U','G']=0.68
+		self.selective_constraint.ix['L','A']=0.89
+
+		self.codondecode_matrix=pd.DataFrame()
+		for firstnt in ['T','C','A','G']:
+			for secondnt in ['T','C','A','G']:
+				for thridnt in ['T','C','A','G']:
+					codon=firstnt+secondnt+thridnt
+					anticodon=str(Seq(codon).reverse_complement().transcribe())  # anticodons use 'U' here
+					self.codondecode_matrix.ix[codon,anticodon]=1
+
+					# wobbling 
+					if thridnt=='T':
+						wobble_anticodon='G'+anticodon[1:]
+						self.codondecode_matrix.ix[codon,wobble_anticodon]=1-self.selective_constraint.ix['G','T']
+					elif thridnt=='C':
+						wobble_anticodon='A'+anticodon[1:]  # 'I' on tRNA is derived from 'A'
+						self.codondecode_matrix.ix[codon,wobble_anticodon]=1-self.selective_constraint.ix['I','C']
+					elif thridnt=='A':
+						wobble_anticodon='A'+anticodon[1:]  # 'I' on tRNA is derived from 'A'
+						self.codondecode_matrix.ix[codon,wobble_anticodon]=1-self.selective_constraint.ix['I','A']
+					elif thridnt=='G':
+						wobble_anticodon='U'+anticodon[1:] 
+						self.codondecode_matrix.ix[codon,wobble_anticodon]=1-self.selective_constraint.ix['U','G']
+					
+		# special wobbling case: 'ATA' (Ile) decoded by 'LAU' ('C' is modified to become 'L')
+		self.codondecode_matrix.ix['ATA','LAU']=1-self.selective_constraint.ix['L','A']
+		self.codondecode_matrix=self.codondecode_matrix.fillna(0)
+
+		# deal with stop codons
+		self.codondecode_matrix.ix['TGA',:]=0
+		self.codondecode_matrix.ix['TAA',:]=0
+		self.codondecode_matrix.ix['TAG',:]=0
+
+
+
+	def weights_from_tRNAgenecopy(self,gbrecord):  # gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
+		self.tRNAtable=pd.DataFrame(index=self.codondecode_matrix.columns,columns=['amino_acid','count']).fillna(0)
+		for f in gbrecord.features:
+			if f.type=='tRNA' and (f.qualifiers['product'][0]!='tRNA-OTHER' and f.qualifiers['product'][0]!='tRNA-Sec'): 
+				anticodon=f.qualifiers['note'][0][11:14]
+				aa_name=f.qualifiers['product'][0][-3:]
+				
+				if aa_name=='Ile' and anticodon=='CAU':
+					self.tRNAtable.ix['LAU','amino_acid']=aa_name
+					self.tRNAtable.ix['LAU','count']+=1
+				else:
+					self.tRNAtable.ix[anticodon,'amino_acid']=aa_name
+					self.tRNAtable.ix[anticodon,'count']+=1
+
+		w=self.codondecode_matrix.dot(self.tRNAtable['count'])
+		w=w/w.max()
+
+		return w
+
+	def weights_from_tRNAabundance(self,trnadf): # trnadf should be pd.DataFrame and include anticodon (1st column) and abundances (2nd column) 
+		self.tRNAtable=pd.DataFrame(index=self.codondecode_matrix.columns,columns=['amino_acid']).fillna(0)
+		self.tRNAtable=pd.merge(self.tRNAtable,trnadf,how='outer',left_index=True,right_index=True).reindex(self.codondecode_matrix.columns)
+
+		w=self.codondecode_matrix.dot(self.tRNAtable['ave'].fillna(0))
+		w=w/w.max()
+
+		return w
+		
+	
+	def lookup_wobbleanticodon(self,codon):
+		return self.codondecode_matrix.ix[codon,:][self.codondecode_matrix.ix[codon,:]>0]
+
+
+
+
+
+
 
 	
 
