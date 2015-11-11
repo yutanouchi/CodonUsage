@@ -31,7 +31,8 @@ class CodonBook(object):
 		self.codonusage['amino_acid']=self.codonusage.index.map(lambda x: self.codontable[x])
 		self.aalist=self.codonusage['amino_acid'].unique() # amino acid list
 
-	def add_gene(self,seqrecord,namestartwith='gene='):  # fasta seqrecord object from Biopython
+	def add_gene(self,seqrecord,namestartwith='gene='):  
+	# seqrecord is a fasta SeqIO.seq object from Biopython
 		# parse seqrecord object
 		genename=re.search(namestartwith+'[a-z,0-9,\ ,\',\-,\.]+',seqrecord.description,flags=re.IGNORECASE)
 		if genename > 0:
@@ -64,17 +65,26 @@ class CodonBook(object):
 		
 		return df.fillna(0)
 
-
 	# use this after creating codonusage by add_gene
-	def expressed_codon(self,expressiondf):  # expressiondf is a pd.DataFrame and contains gene names (1st column) and counts (2nd column)
+	def expressed_codon(self,expressiondf,genedict):  
+	# expressiondf is a pd.DataFrame and contains gene names (1st column) and counts (2nd column)
+	# genedict is a SynGeneName instance to match gene names in expressiondf and self.codonusage
 		df=expressiondf
 		self.expressed_codonusage=self.codonusage.copy()
-		
-		for gene in df.index:
+		genelist=self.expressed_codonusage.columns
+		genenotfound=[]
+		for gene in df.index:  # loop over genes in the expression data
+			is_genein=genelist.isin(genedict.lookup(gene))
+			if any(is_genein):  # see if the 'gene' or any of its synonyms is listed in self.expressed_codonusage
+				self.expressed_codonusage.ix['count',genelist[is_genein]]=df.ix[gene]
+			else:
+				genenotfound.append(gene)
+		print genenotfound
 
 
 class SynGeneName(object):
-	def __init__(self,gbrecord): # gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
+	def __init__(self,gbrecord): 
+	# gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
 		self.namedict={}
 		for f in gbrecord.features:
 			if f.type=='CDS':
@@ -82,14 +92,15 @@ class SynGeneName(object):
 				synname=re.split(';\ *',f.qualifiers['gene_synonym'][0])
 				if not self.namedict.has_key(genename):
 					synname.append(genename)
-					self.namedict.update({name:synname for name in synname})
+					self.namedict.update({name.lower():synname for name in synname})
 				
 
 	def lookup(self,primaryname):
-		if self.namedict.has_key(primaryname):
-			return self.namedict[primaryname]
+		if self.namedict.has_key(primaryname.lower()):
+			return self.namedict[primaryname.lower()]
 		else:
 			print(primaryname+' does not exist')
+			return []
 
 
 
@@ -138,7 +149,8 @@ class tAI(object):
 
 
 
-	def weights_from_tRNAgenecopy(self,gbrecord):  # gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
+	def weights_from_tRNAgenecopy(self,gbrecord):  
+	# gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
 		self.tRNAtable=pd.DataFrame(index=self.codondecode_matrix.columns,columns=['amino_acid','count']).fillna(0)
 		for f in gbrecord.features:
 			if f.type=='tRNA' and (f.qualifiers['product'][0]!='tRNA-OTHER' and f.qualifiers['product'][0]!='tRNA-Sec'): 
@@ -181,13 +193,26 @@ class tAI(object):
 
 if __name__ == "__main__":
 
+	
+
 	# load fasta
-	filepath='sequence_data/lambda_cds.txt'
+	filepath='sequence_data/MG1655_cds.txt'
 	record=SeqIO.parse(open(filepath,'rU'),'fasta')
 	book=CodonBook()
 
 	for feature in record:
 		book.add_gene(feature)
+
+	# make name table
+	filepath='sequence_data/MG1655.gb'
+	record=SeqIO.parse(open(filepath,'rU'),'genbank').next()
+	nametable=SynGeneName(record)
+
+	# load expression data
+	proteincounts=pd.read_csv('lit_data/ProteinCounts_Li_2014.csv',index_col='Gene')
+	book.expressed_codon(proteincounts['MOPS complete'],nametable)
+
+	import ipdb; ipdb.set_trace()#
 
 	# df=book.normalize_by_totalaa().ix[:,1:].transpose()
 	# df=book.codonusage.ix[book.sensitivecodons,1:].transpose()
