@@ -12,7 +12,7 @@ from scipy.cluster.hierarchy import dendrogram, linkage, cophenet
 from scipy.spatial.distance import pdist
 
 
-plt.style.use('ggplot')
+
 
 class CodonBook(object):
 	def __init__(self):
@@ -30,25 +30,66 @@ class CodonBook(object):
 		self.codonusage=pd.DataFrame([],index=self.codontable.keys())
 		self.codonusage['amino_acid']=self.codonusage.index.map(lambda x: self.codontable[x])
 		self.aalist=self.codonusage['amino_acid'].unique() # amino acid list
+		self.locustag_dict={} # look-up dictionary between primary gene names and locus tag
+		self.synnames_dict={}  # look-up dictionary from syn gene names to locus tag
 
-	def add_gene(self,seqrecord,namestartwith='gene='):  
-	# seqrecord is a fasta SeqIO.seq object from Biopython
+	def add_genes(self,seqrecord):  
+	# seqrecord is a genbank SeqIO.seq object from Biopython. Genes are lostes by locus tag (e.g. b0001)
 		# parse seqrecord object
-		genename=re.search(namestartwith+'[a-z,0-9,\ ,\',\-,\.]+',seqrecord.description,flags=re.IGNORECASE)
-		if genename > 0:
-			genename=genename.group(0)[len(namestartwith):]
+		seq=seqrecord.seq
+
+		for f in seqrecord.features:
+			if f.type=='CDS': # only look at CDSs
+				strand=f.strand   # 1: positive, -1: negative
+				start=f.location.start.position
+				end=f.location.end.position
+				locus_tag=f.qualifiers['locus_tag'][0]
+				
+				if f.qualifiers.has_key('gene'):
+					genename=f.qualifiers['gene'][0] # primary gene name
+				else:
+					genename=locus_tag
+
+				if f.qualifiers.has_key('gene_synonym'):
+					synnames=re.split(';\ *',f.qualifiers['gene_synonym'][0])
+				else:
+					synnames=[]
+
+				# update dict. the last element of synnames is the primary gene name
+				# note that there are multiple copies of ins genes (e.g. 4 copies of insB1)
+				# and genename-to-locus_tag dict will be overwritten and leavs only the last entry  
+				self.locustag_dict.update({genename.lower():locus_tag})	
+				self.locustag_dict.update({locus_tag.lower():genename})
+				self.synnames_dict.update({name.lower():locus_tag for name in synnames})
+
+				# fetch cds sequence
+				cds_seq=seq[start:end]
+				if strand<0: # if cds is on negative strand
+					cds_seq=cds_seq.reverse_complement()
+				cds_seq=str(cds_seq)
+		
+				# extract codon info
+				triplets=pd.Series([cds_seq[i:i+3] for i in range(3,len(cds_seq)-3,3)])   # split sequences into codons (exclude start and stop codon)
+				triplet_counts=triplets.value_counts().to_dict()
+				df=pd.DataFrame(triplet_counts.values(),index=triplet_counts.keys(),columns=[locus_tag])
+
+				# add to codonusage dataframe
+				self.codonusage=pd.merge(self.codonusage,df,how='outer',left_index=True,right_index=True).fillna(0)
+				self.codonusage=self.codonusage.sort_values('amino_acid')
+
+	def lookup_locustag(self,genename):
+		if self.locustag_dict.has_key(genename.lower()):
+			return self.locustag_dict[genename.lower()]
 		else:
-			genename='noname'	
-		seq=str(seqrecord.seq)
+			# print(genename+' does not exist in locustag dict')
+			return ''
 
-		# extract codon info
-		triplets=pd.Series([seq[i:i+3] for i in range(3,len(seq)-3,3)])   # split sequences into codons (exclude start and stop codon)
-		triplet_counts=triplets.value_counts().to_dict()
-		df=pd.DataFrame(triplet_counts.values(),index=triplet_counts.keys(),columns=[genename])
-
-		# add to codonusage dataframe
-		self.codonusage=pd.merge(self.codonusage,df,how='outer',left_index=True,right_index=True).fillna(0)
-		self.codonusage=self.codonusage.sort_values('amino_acid')
+	def lookup_synnames(self,genename):
+		if self.synnames_dict.has_key(genename.lower()):
+			return self.synnames_dict[genename.lower()]
+		else:
+			# print(genename+' does not exist in synnames dict')
+			return ''
 
 	def normalize_by_aa(self):  # normalize codon frequencies within each amino acid
 		df=self.codonusage.copy()
@@ -61,47 +102,41 @@ class CodonBook(object):
 
 	def normalize_by_totalaa(self):
 		df=self.codonusage.copy()
-		df.ix[:,1:]/df.ix[:,1:].sum()
+		df.ix[:,1:]=df.ix[:,1:]/df.ix[:,1:].sum()
 		
 		return df.fillna(0)
 
-	# use this after creating codonusage by add_gene
-	def expressed_codon(self,expressiondf,genedict):  
+	# use this after creating codonusage by add_genes
+	def codon_expression(self,expressiondf):  
 	# expressiondf is a pd.DataFrame and contains gene names (1st column) and counts (2nd column)
-	# genedict is a SynGeneName instance to match gene names in expressiondf and self.codonusage
-		df=expressiondf
-		self.expressed_codonusage=self.codonusage.copy()
-		genelist=self.expressed_codonusage.columns
-		genenotfound=[]
-		for gene in df.index:  # loop over genes in the expression data
-			is_genein=genelist.isin(genedict.lookup(gene))
-			if any(is_genein):  # see if the 'gene' or any of its synonyms is listed in self.expressed_codonusage
-				self.expressed_codonusage.ix['count',genelist[is_genein]]=df.ix[gene]
-			else:
-				genenotfound.append(gene)
-		print genenotfound
+		if len(self.codonusage.columns)>2:   # check if genes have been added to codonusage
+			df=expressiondf
+			codon_expression=self.codonusage.copy()
+			locustag_list=self.codonusage.columns[1:]
+			expression_counts=pd.DataFrame(index=['count'],columns=locustag_list).fillna(0)
+			genenotfound=[]
+			
+			for gene in df.index:  # loop over genes in the expression data
+				locus_tag=self.lookup_locustag(gene)
+				is_genein=locustag_list.isin([locus_tag])
+				if any(is_genein):  # see if the 'gene' is listed in .expressed_codonusage
+					expression_counts.ix['count',locus_tag]=df.ix[gene]
+				else:
+					locus_tag=self.lookup_synnames(gene)
+					is_genein=locustag_list.isin([locus_tag])
+					if any(is_genein): # see if the syn name of 'gene' is listed in .expressed_codonusage
+						expression_counts.ix['count',locus_tag]=df.ix[gene]
 
+					else:
+						genenotfound.append(gene)
+					
+			print genenotfound
+			codon_expression.ix[:,1]=self.codonusage.ix[:,1:]*expression_counts.ix['count',:]
 
-class SynGeneName(object):
-	def __init__(self,gbrecord): 
-	# gbrecord is SeqIO.seq object: gbrecord=SeqIO.parse(open('filepath'),'genbank').next()
-		self.namedict={}
-		for f in gbrecord.features:
-			if f.type=='CDS':
-				genename=f.qualifiers['gene'][0]
-				synname=re.split(';\ *',f.qualifiers['gene_synonym'][0])
-				if not self.namedict.has_key(genename):
-					synname.append(genename)
-					self.namedict.update({name.lower():synname for name in synname})
-				
+			return codon_expression.sum(axis='columns')
 
-	def lookup(self,primaryname):
-		if self.namedict.has_key(primaryname.lower()):
-			return self.namedict[primaryname.lower()]
 		else:
-			print(primaryname+' does not exist')
-			return []
-
+			print('No gene has been added. Perform add_genes method first')
 
 
 
@@ -164,19 +199,20 @@ class tAI(object):
 					self.tRNAtable.ix[anticodon,'amino_acid']=aa_name
 					self.tRNAtable.ix[anticodon,'count']+=1
 
-		w=self.codondecode_matrix.dot(self.tRNAtable['count'])
-		w=w/w.max()
+		weights=self.codondecode_matrix.dot(self.tRNAtable['count'])
+		weights=weights/weights.max()
 
-		return w
+		return weights
 
-	def weights_from_tRNAabundance(self,trnadf): # trnadf should be pd.DataFrame and include anticodon (1st column) and abundances (2nd column) 
+	def weights_from_tRNAabundance(self,trnadf): 
+	# trnadf should be pd.DataFrame and include anticodon (1st column) and abundances (2nd column) 
 		self.tRNAtable=pd.DataFrame(index=self.codondecode_matrix.columns,columns=['amino_acid']).fillna(0)
 		self.tRNAtable=pd.merge(self.tRNAtable,trnadf,how='outer',left_index=True,right_index=True).reindex(self.codondecode_matrix.columns)
 
-		w=self.codondecode_matrix.dot(self.tRNAtable['ave'].fillna(0))
-		w=w/w.max()
+		weights=self.codondecode_matrix.dot(self.tRNAtable['ave'].fillna(0))
+		weights=weights/weights.max()
 
-		return w
+		return weights
 		
 	
 	def lookup_wobbleanticodon(self,codon):
@@ -194,54 +230,20 @@ class tAI(object):
 if __name__ == "__main__":
 
 	
-
 	# load fasta
-	filepath='sequence_data/MG1655_cds.txt'
-	record=SeqIO.parse(open(filepath,'rU'),'fasta')
-	book=CodonBook()
-
-	for feature in record:
-		book.add_gene(feature)
+	
 
 	# make name table
-	filepath='sequence_data/MG1655.gb'
-	record=SeqIO.parse(open(filepath,'rU'),'genbank').next()
-	nametable=SynGeneName(record)
+	# import ipdb; ipdb.set_trace()#
 
-	# load expression data
-	proteincounts=pd.read_csv('lit_data/ProteinCounts_Li_2014.csv',index_col='Gene')
-	book.expressed_codon(proteincounts['MOPS complete'],nametable)
+	
+
+
+
 
 	import ipdb; ipdb.set_trace()#
 
-	# df=book.normalize_by_totalaa().ix[:,1:].transpose()
-	# df=book.codonusage.ix[book.sensitivecodons,1:].transpose()
-	# Compute and plot first dendrogram.
-	fig = plt.figure(figsize=(18,12))
-	ax1 = fig.add_axes([0.05,0.1,0.2,0.8])
-	y=linkage(df,method='ward')
-	z=dendrogram(y,orientation='right')
-	ax1.set_xticks([])
-	ax1.set_yticks([])
-
-
-	# Plot distance matrix.
-	axmatrix = fig.add_axes([0.3,0.1,0.6,0.8])
-	idx1 = z['leaves']
-	# idx2 = Z2['leaves']
-	df = df.ix[idx1,:]
-	# D = D.ix[:,idx2]
-	im = axmatrix.matshow(df, aspect='auto', origin='lower', cmap=matplotlib.cm.YlOrRd)
-	axmatrix.set_xticks(range(len(df.columns)))
-	axmatrix.set_yticks(range(len(df.index)))
-	axmatrix.set_xticklabels(df.columns,rotation=90)
-	axmatrix.set_yticklabels(df.index)
-
-	# Plot colorbar.
-	axcolor = fig.add_axes([0.91,0.1,0.02,0.8])
-	plt.colorbar(im,cax=axcolor)
-	fig.savefig('cluster.pdf')
-	# fig.show()
+	
 
 
 

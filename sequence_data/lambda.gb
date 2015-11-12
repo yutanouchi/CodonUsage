@@ -1038,7 +1038,7 @@ FEATURES             Location/Qualifiers
                      /locus_tag="lambdap20"
                      /codon_start=1
                      /transl_table=11
-                     /product="tail component"
+                     /product="tail component"						
                      /protein_id="NP_040599.1"
                      /db_xref="GI:9626263"
                      /db_xref="GeneID:2703515"
