@@ -36,6 +36,9 @@ class CodonBook(object):
 					'MET':'M','M':'Met','LEU':'L','L':'Leu','LYS':'K','K':'Lys','PHE':'F','F':'Phe','PRO':'P','P':'Pro',
 					'SER':'S','S':'Ser','THR':'T','T':'Thr','TRP':'W','W':'Trp','TYR':'Y','Y':'Tyr','VAL':'V','V':'Val','STOP':'Stop'}
 	
+	
+
+
 	def __init__(self):
 		
 		self.codonusage=pd.DataFrame([],index=self.__codontable.keys())
@@ -54,6 +57,55 @@ class CodonBook(object):
 			return cls.__reversecodontable[arg.upper()]
 		else:
 			return ''
+
+	@classmethod
+	def codon_to_anticodon(cls,codon):  # codon in AGTC, anticodin in AGUC
+		codon=Seq(codon)
+		anticodon=str(codon.reverse_complement())
+		anticodon=re.sub('T','U',anticodon.upper())
+
+		return anticodon
+
+	@classmethod
+	def anticodon_to_codon(cls,anticodon):  # codon in AGTC, anticodin in AGUC
+		anticodon=Seq(anticodon)
+		codon=str(anticodon.reverse_complement())
+		codon=re.sub('U','T',codon.upper())
+
+		return codon
+
+	@classmethod
+	def anticodon_to_wobblecodon(cls,anticodon):
+		codon=cls.anticodon_to_codon(anticodon)
+		wobblecodon=codon
+		if anticodon[0]==A:
+			wobblecodon[]
+
+	@classmethod
+	def find_trna(cls,seqrecord):
+		trna=pd.DataFrame(columns=['start','end','strand','amino_acid','anticodon','codon','wobble_codons'])
+		for f in seqrecord.features:
+			if (f.type=='tRNA') and (f.qualifiers['product'] != ['tRNA-OTHER']):
+				start=f.location.start.position
+				end=f.location.end.position
+				strand=f.strand
+				aminoacid=f.qualifiers['product'][0][-3:]
+				if f.qualifiers.has_key('note'):
+					anticodon=re.match('anticodon:\ [ATCGU]{3}',f.qualifiers['note'][0]).group()[-3:]
+				else:
+					anticodon=''
+
+				trna.ix[f.qualifiers['locus_tag'][0],'start']=start
+				trna.ix[f.qualifiers['locus_tag'][0],'end']=end
+				trna.ix[f.qualifiers['locus_tag'][0],'strand']=strand # 1 if positive -1 if negative
+				trna.ix[f.qualifiers['locus_tag'][0],'amino_acid']=aminoacid
+				trna.ix[f.qualifiers['locus_tag'][0],'anticodon']=anticodon
+				
+				trna['codon']=trna['anticodon'].apply(lambda x:cls.anticodon_to_codon(x))
+
+
+		return trna
+
 
 	def add_genes(self,seqrecord):  
 	# seqrecord is a genbank SeqIO.seq object from Biopython. Genes are identified by locus tag (e.g. b0001)
@@ -275,9 +327,6 @@ class TransEff(object):
 	
 	def lookup_wobbleanticodon(self,codon):
 		return self.codondecode_matrix.ix[codon.upper(),:][self.codondecode_matrix.ix[codon.upper(),:]>0]
-
-
-
 
 
 
